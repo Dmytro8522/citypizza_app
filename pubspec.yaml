@@ -7,6 +7,14 @@ environment:
   sdk: ^3.7.2
 
 dependencies:
+  firebase_core: ^2.30.0
+  firebase_messaging: ^14.7.10
+  lottie: ^2.4.0
+  flutter_local_notifications: ^17.1.2
+  shared_preferences: ^2.2.2
+  intl: ^0.18.1
+  app_links: ^3.4.3
+  flutter_colorpicker: ^1.0.3
   flutter:
     sdk: flutter
 
@@ -23,7 +31,6 @@ dependencies:
   video_player: ^2.5.0
   google_fonts: ^4.0.3
   url_launcher: ^6.1.7
-  shared_preferences: ^2.0.15
 
 dev_dependencies:
   flutter_test:
@@ -46,5 +53,7 @@ flutter:
   assets:
     - assets/logo.png
     - assets/onboarding.mp4
+    - assets/pizza_slice.png
     - assets/cookie_illustration.png
     - assets/icon/app_icon.png
+    - assets/fire.json

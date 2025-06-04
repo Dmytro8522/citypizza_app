@@ -1,65 +1,179 @@
+// lib/screens/home_screen.dart
+
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../services/cart_service.dart';
+import '../theme/theme_provider.dart';
+import '../widgets/common_app_bar.dart';
+import '../widgets/creative_cta_section.dart';
+import '../widgets/no_internet_widget.dart';
+import 'cart_screen.dart';
+import 'discount_list_widget.dart';
 import 'menu_item_detail_screen.dart';
 import 'menu_screen.dart';
-import 'cart_screen.dart';
 import 'profile_screen.dart';
 import 'profile_screen_auth.dart';
-import '../services/cart_service.dart';
+import 'recent_orders_carousel.dart';
+import 'top_items_carousel.dart';
 
-/// Модель пункта меню
+/// Модель пункта меню.
+/// Если вы уже импортируете её из другого файла, 
+/// просто уберите дублирование и используйте свой импорт.
 class MenuItem {
   final int id;
   final String name;
   final String? description;
   final String? imageUrl;
-  final double? klein;
-  final double? normal;
-  final double? gross;
-  final double? familie;
-  final double? party;
+  final String? article;
+  final double? klein, normal, gross, familie, party;
+  final double minPrice;
+  final bool hasMultipleSizes;
+  final double? singleSizePrice;
 
   MenuItem({
     required this.id,
     required this.name,
     this.description,
     this.imageUrl,
+    this.article,
     this.klein,
     this.normal,
     this.gross,
     this.familie,
     this.party,
+    required this.minPrice,
+    this.hasMultipleSizes = true,
+    this.singleSizePrice,
   });
 
   factory MenuItem.fromMap(Map<String, dynamic> m) => MenuItem(
         id: m['id'] as int,
         name: m['name'] as String,
         description: m['description'] as String?,
-        imageUrl: m['image'] as String?,
+        imageUrl: (m['image_url'] as String?) ?? (m['image'] as String?),
+        article: m['article'] as String?,
         klein: (m['klein'] as num?)?.toDouble(),
         normal: (m['normal'] as num?)?.toDouble(),
         gross: (m['gross'] as num?)?.toDouble(),
         familie: (m['familie'] as num?)?.toDouble(),
         party: (m['party'] as num?)?.toDouble(),
+        minPrice: m['minPrice'] is num ? (m['minPrice'] as num).toDouble() : 0.0,
+        hasMultipleSizes: m['has_multiple_sizes'] as bool? ?? true,
+        singleSizePrice:
+            m['single_size_price'] != null ? (m['single_size_price'] as num).toDouble() : null,
       );
+}
 
-  double get minPrice {
-    final prices = <double>[];
-    if (klein != null) prices.add(klein!);
-    if (normal != null) prices.add(normal!);
-    if (gross != null) prices.add(gross!);
-    if (familie != null) prices.add(familie!);
-    if (party != null) prices.add(party!);
-    if (prices.isEmpty) return 0.0;
-    prices.sort();
-    return prices.first;
+/// Виджет с анимированным градиентным фоном для обёртки секций.
+class AnimatedGradientSection extends StatefulWidget {
+  final Widget title;
+  final Widget child;
+  final List<List<Color>> gradients;
+  final Duration duration;
+
+  const AnimatedGradientSection({
+    Key? key,
+    required this.title,
+    required this.child,
+    required this.gradients,
+    this.duration = const Duration(seconds: 3),
+  }) : super(key: key);
+
+  @override
+  State<AnimatedGradientSection> createState() => _AnimatedGradientSectionState();
+}
+
+class _AnimatedGradientSectionState extends State<AnimatedGradientSection> {
+  int _gradientIndex = 0;
+  late Timer _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    // Запускаем таймер для циклической смены градиента
+    _timer = Timer.periodic(widget.duration, (_) {
+      setState(() {
+        _gradientIndex = (_gradientIndex + 1) % widget.gradients.length;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = widget.gradients[_gradientIndex];
+    return Stack(
+      children: [
+        AnimatedContainer(
+          duration: widget.duration,
+          curve: Curves.easeInOut,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            gradient: LinearGradient(
+              colors: colors,
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+          margin: const EdgeInsets.symmetric(vertical: 10),
+          padding: const EdgeInsets.only(top: 16, left: 16, bottom: 16, right: 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              widget.title,
+              const SizedBox(height: 12),
+              widget.child,
+            ],
+          ),
+        ),
+        // Наложение полупрозрачного градиента справа
+        Positioned(
+          right: 0,
+          top: 0,
+          bottom: 0,
+          child: IgnorePointer(
+            child: Container(
+              width: 54,
+              decoration: BoxDecoration(
+                borderRadius: const BorderRadius.only(
+                  topRight: Radius.circular(20),
+                  bottomRight: Radius.circular(20),
+                ),
+                gradient: LinearGradient(
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                  colors: [
+                    Colors.transparent,
+                    Colors.black.withOpacity(0.07),
+                    Colors.black.withOpacity(0.12),
+                    Colors.black.withOpacity(0.24),
+                    Colors.black.withOpacity(0.45),
+                  ],
+                  stops: const [0.0, 0.3, 0.6, 0.85, 1.0],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 }
 
+/// Главный экран с табами: «Главная», «Меню», «Профиль»
 class HomeScreen extends StatefulWidget {
-  /// Индекс вкладки, на которую нужно сразу перейти
   final int initialIndex;
 
   const HomeScreen({Key? key, this.initialIndex = 0}) : super(key: key);
@@ -69,20 +183,21 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final _supabase = Supabase.instance.client;
+  final SupabaseClient supabase = Supabase.instance.client;
   final TextEditingController _searchController = TextEditingController();
+  bool _showSearch = false;
 
   List<MenuItem> _allItems = [];
   List<MenuItem> _filteredItems = [];
   bool _loading = true;
   String? _error;
-  late int _selectedIndex;
+  int _tabIndex = 0;
 
   @override
   void initState() {
     super.initState();
-    _selectedIndex = widget.initialIndex;
-    _loadMenu();
+    _tabIndex = widget.initialIndex;
+    _loadMenu(); // Загружаем меню при инициализации (с учётом кэша)
     _searchController.addListener(_onSearchChanged);
   }
 
@@ -93,200 +208,347 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
+  /// Фильтрация списка при вводе в строке поиска
   void _onSearchChanged() {
-    final q = _searchController.text.toLowerCase();
+    final query = _searchController.text.toLowerCase();
     setState(() {
-      _filteredItems = q.isEmpty
+      _filteredItems = query.isEmpty
           ? List.from(_allItems)
-          : _allItems.where((item) => item.name.toLowerCase().contains(q)).toList();
+          : _allItems.where((item) => item.name.toLowerCase().contains(query)).toList();
     });
   }
 
-  Future<void> _loadMenu() async {
+  /// Загрузка меню из Supabase с кэшированием в SharedPreferences и обработкой ошибок сети.
+  Future<void> _loadMenu({bool refresh = false}) async {
     setState(() {
       _loading = true;
       _error = null;
     });
+
+    final prefs = await SharedPreferences.getInstance();
+
+    // ШАГ 1: Если не refresh и в кэше есть данные — показываем их сразу
+    if (!refresh && prefs.containsKey('cached_menu')) {
+      try {
+        final cachedString = prefs.getString('cached_menu')!;
+        final List decoded = json.decode(cachedString) as List;
+        final cachedItems = decoded
+            .map((e) => MenuItem.fromMap(e as Map<String, dynamic>))
+            .toList();
+        _allItems = cachedItems;
+        _filteredItems = List.from(_allItems);
+        setState(() => _loading = false);
+      } catch (_) {
+        // Если не удалось распарсить кэш — просто игнорируем
+      }
+    }
+
+    // ШАГ 2: Пробуем получить актуальные данные с Supabase
     try {
-      final data = await _supabase.from('menu_item').select().order('id', ascending: true);
-      final list = data as List<dynamic>;
-      _allItems = list.map((e) => MenuItem.fromMap(e as Map<String, dynamic>)).toList();
+      final data = await supabase
+          .from('menu_item')
+          .select()
+          .order('id', ascending: true);
+      final itemsFromServer = (data as List)
+          .map((e) => MenuItem.fromMap(e as Map<String, dynamic>))
+          .toList();
+
+      _allItems = itemsFromServer;
       _filteredItems = List.from(_allItems);
+
+      // ШАГ 3: Обновляем кэш в SharedPreferences
+      await prefs.setString('cached_menu', json.encode(data));
+    } on SocketException {
+      // Если нет интернета
+      _error = 'Нет подключения к интернету';
     } catch (e) {
+      // Любая другая ошибка
       _error = e.toString();
     } finally {
-      setState(() {
-        _loading = false;
-      });
+      // Проверяем mounted, чтобы не вызывать setState после dispose
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
     }
+  }
+
+  /// При выходе из профиля: переключаемся на вкладку «Профиль»
+  void _handleLogout() {
+    setState(() => _tabIndex = 2);
+  }
+
+  /// Переход в экран корзины. После возврата обновляем состояние, чтобы бейджик пересчитал товары.
+  void _goToCart() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const CartScreen()),
+    ).then((_) {
+      if (!mounted) return;
+      setState(() {
+        // Обновляем, чтобы значок корзины отобразил актуальное количество
+      });
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    Widget body;
+    final appTheme = ThemeProvider.of(context);
+
+    // Название AppBar по текущему табу
+    final title = _tabIndex == 0
+        ? 'City Pizza Service'
+        : _tabIndex == 1
+            ? 'Menü'
+            : 'Profil';
+
+    // Определяем, какой контент показывать внутри body
+    Widget bodyContent;
     if (_loading) {
-      body = const Center(child: CircularProgressIndicator(color: Colors.orange));
+      // Пока идёт загрузка — показываем индикатор
+      bodyContent = const Center(child: CircularProgressIndicator(color: Colors.orange));
     } else if (_error != null) {
-      body = Center(
-        child: Text('Fehler: $_error', style: GoogleFonts.poppins(color: Colors.white)),
+      // Используем универсальный виджет для отсутствия интернета
+      bodyContent = NoInternetWidget(
+        onRetry: () => _loadMenu(refresh: true),
+        errorText: _error == 'Нет подключения к интернету' ? 'Keine Internetverbindung' : _error,
       );
-    } else if (_selectedIndex == 0) {
-      body = _buildHomeTab();
-    } else if (_selectedIndex == 1) {
-      body = const MenuScreen();
     } else {
-      // вкладка "Profil": показываем разный экран в зависимости от авторизации
-      final user = Supabase.instance.client.auth.currentUser;
-      if (user != null) {
-        body = const ProfileScreenAuth();
-      } else {
-        body = const ProfileScreen();
-      }
-    }
-
-    String title;
-    if (_selectedIndex == 0) {
-      title = 'City Pizza';
-    } else if (_selectedIndex == 1) {
-      title = 'Menü';
-    } else {
-      title = 'Profil';
-    }
-
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black,
-        leading: Navigator.of(context).canPop()
-            ? IconButton(
-                icon: const Icon(Icons.arrow_back, color: Colors.white),
-                onPressed: () => Navigator.of(context).pop(),
-              )
-            : null,
-        title: Text(title, style: GoogleFonts.fredokaOne(color: Colors.orange)),
-        centerTitle: true,
-        elevation: 0,
-        actions: [
-          Stack(
-            children: [
-              IconButton(
-                icon: const Icon(Icons.shopping_cart, color: Colors.white),
-                onPressed: () {
-                  Navigator.push(context, MaterialPageRoute(builder: (_) => const CartScreen()))
-                      .then((_) => setState(() {}));
-                },
-              ),
-              if (CartService.items.isNotEmpty)
-                Positioned(
-                  right: 6,
-                  top: 6,
-                  child: Container(
-                    padding: const EdgeInsets.all(2),
-                    decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
-                    constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
-                    child: Text(
-                      '${CartService.items.length}',
-                      style: const TextStyle(color: Colors.white, fontSize: 10),
-                      textAlign: TextAlign.center,
+      // Нет загрузки и нет ошибок — смотрим, какая вкладка выбрана
+      if (_tabIndex == 0) {
+        // === Вкладка «Главная» ===
+        bodyContent = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (_showSearch) ...[
+              SizedBox(
+                height: 40,
+                child: TextField(
+                  controller: _searchController,
+                  autofocus: true,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    hintText: 'Suche Pizza…',
+                    hintStyle: const TextStyle(color: Colors.white54),
+                    prefixIcon: const Icon(Icons.search, color: Colors.white54),
+                    filled: true,
+                    fillColor: Colors.white10,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 16),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(30),
+                      borderSide: BorderSide.none,
                     ),
                   ),
                 ),
+              ),
+              const SizedBox(height: 12),
             ],
-          ),
-        ],
-      ),
+            Expanded(
+              child: RefreshIndicator(
+                color: Colors.orange,
+                onRefresh: () => _loadMenu(refresh: true),
+                child: _showSearch && _searchController.text.trim().isNotEmpty
+                    // Если поиск открыт и пользователь что-то ввёл — показываем поиск
+                    ? GridView.builder(
+                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                        itemCount: _filteredItems.length,
+                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 2,
+                          mainAxisSpacing: 12,
+                          crossAxisSpacing: 12,
+                          childAspectRatio: 0.75,
+                        ),
+                        itemBuilder: (ctx, i) {
+                          final item = _filteredItems[i];
+                          return GestureDetector(
+                            onTap: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(builder: (_) => MenuItemDetailScreen(item: item)),
+                              ).then((_) {
+                                if (!mounted) return;
+                                setState(() {});
+                              });
+                            },
+                            child: _MenuCard(item: item),
+                          );
+                        },
+                      )
+                    // Иначе — стандартный главный экран с секциями
+                    : _buildHomeTab(),
+              ),
+            ),
+          ],
+        );
+      } else if (_tabIndex == 1) {
+        // === Вкладка «Меню» ===
+        bodyContent = const MenuScreen();
+      } else {
+        // === Вкладка «Профиль» ===
+        final user = supabase.auth.currentUser;
+        bodyContent = user != null
+            ? ProfileScreenAuth(onLogout: _handleLogout)
+            : const ProfileScreen();
+      }
+    }
+
+    return Scaffold(
+      backgroundColor: appTheme.backgroundColor,
+      appBar: _tabIndex == 0
+          // Если мы на главной вкладке — рисуем кастомный AppBar с возможностью поиска и корзиной
+          ? AppBar(
+              backgroundColor: appTheme.backgroundColor,
+              elevation: 0,
+              centerTitle: true,
+              leading: IconButton(
+                icon: Icon(
+                  _showSearch ? Icons.close : Icons.search,
+                  color: appTheme.iconColor,
+                ),
+                onPressed: () {
+                  setState(() {
+                    _showSearch = !_showSearch;
+                    if (!_showSearch) {
+                      _searchController.clear();
+                    }
+                  });
+                },
+              ),
+              title: Text(title),
+              titleTextStyle: GoogleFonts.fredokaOne(
+                color: appTheme.primaryColor,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+              actions: [
+                // Заменено: теперь используем ValueListenableBuilder для обновления бейджика корзины
+                ValueListenableBuilder<int>(
+                  valueListenable: CartService.cartCountNotifier,
+                  builder: (context, cartCount, child) {
+                    return Stack(
+                      children: [
+                        IconButton(
+                          icon: Icon(Icons.shopping_cart, color: appTheme.iconColor),
+                          onPressed: _goToCart,
+                        ),
+                        if (cartCount > 0)
+                          Positioned(
+                            right: 6,
+                            top: 6,
+                            child: Container(
+                              padding: const EdgeInsets.all(2),
+                              decoration: const BoxDecoration(
+                                color: Colors.red,
+                                shape: BoxShape.circle,
+                              ),
+                              constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                              child: Text(
+                                '$cartCount',
+                                style: const TextStyle(color: Colors.white, fontSize: 10),
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                          ),
+                      ],
+                    );
+                  },
+                ),
+              ],
+            )
+          // В остальных случаях (Меню/Профиль) используем общий AppBar
+          : buildCommonAppBar(title: title, context: context),
       body: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        child: body,
+        child: bodyContent,
       ),
+      extendBody: true,
       bottomNavigationBar: BottomNavigationBar(
-        backgroundColor: Colors.black,
-        selectedItemColor: Colors.orange,
-        unselectedItemColor: Colors.white54,
-        currentIndex: _selectedIndex,
-        onTap: (i) => setState(() => _selectedIndex = i),
+        backgroundColor: appTheme.backgroundColor,
+        currentIndex: _tabIndex,
+        selectedItemColor: appTheme.primaryColor,
+        unselectedItemColor: appTheme.textColorSecondary,
+        onTap: (index) {
+          setState(() {
+            _tabIndex = index;
+          });
+        },
         items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
-          BottomNavigationBarItem(icon: Icon(Icons.local_pizza), label: 'Menü'),
-          BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Profil'),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.home),
+            label: 'Главная',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.menu_book),
+            label: 'Меню',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.person),
+            label: 'Профиль',
+          ),
         ],
       ),
     );
   }
 
+  /// Вспомогательный метод: строит содержимое вкладки «Главная» 
+  /// с основными секциями: CTA, недавние заказы, скидки, топ-позиции
   Widget _buildHomeTab() {
-    return Column(
+    return ListView(
+      clipBehavior: Clip.none,
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom),
       children: [
-        TextField(
-          controller: _searchController,
-          style: const TextStyle(color: Colors.white),
-          decoration: InputDecoration(
-            hintText: 'Suche Pizza…',
-            hintStyle: const TextStyle(color: Colors.white54),
-            prefixIcon: const Icon(Icons.search, color: Colors.white54),
-            filled: true,
-            fillColor: Colors.white10,
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(30),
-              borderSide: BorderSide.none,
-            ),
-          ),
+        CreativeCtaSection(
+          onTap: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const MenuScreen()),
+            ).then((_) {
+              if (!mounted) return;
+              setState(() {});
+            });
+          },
         ),
+        const SizedBox(height: 24),
+        const RecentOrdersSection(),
         const SizedBox(height: 12),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Text(
-            'Unsere Spezialitäten',
-            style: GoogleFonts.poppins(
-              color: Colors.white,
-              fontSize: 20,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ),
+        const DiscountListWidget(),
         const SizedBox(height: 12),
-        Expanded(
-          child: GridView.builder(
-            itemCount: _filteredItems.length,
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 2,
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-              childAspectRatio: 0.75,
-            ),
-            itemBuilder: (context, i) {
-              final item = _filteredItems[i];
-              return GestureDetector(
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => MenuItemDetailScreen(item: item)),
-                  ).then((_) => setState(() {}));
-                },
-                child: _MenuCard(item: item),
-              );
-            },
-          ),
+        TopItemsSection(
+          onTap: (item) {
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => MenuItemDetailScreen(item: item)),
+            ).then((_) {
+              if (!mounted) return;
+              setState(() {});
+            });
+          },
         ),
       ],
     );
   }
 }
 
+/// Простой карточный виджет для элементов меню (используется в GridView при поиске)
 class _MenuCard extends StatelessWidget {
   final MenuItem item;
+
   const _MenuCard({Key? key, required this.item}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(20)),
+      decoration: BoxDecoration(
+        color: Colors.white10,
+        borderRadius: BorderRadius.circular(20),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(
             child: ClipRRect(
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+              borderRadius: BorderRadius.circular(20),
               child: item.imageUrl != null
                   ? Image.network(item.imageUrl!, fit: BoxFit.cover)
                   : const SizedBox.shrink(),
@@ -305,7 +567,7 @@ class _MenuCard extends StatelessWidget {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                if (item.description != null) ...[
+                if (item.description != null && item.description!.isNotEmpty) ...[
                   const SizedBox(height: 4),
                   Text(
                     item.description!,
@@ -316,7 +578,7 @@ class _MenuCard extends StatelessWidget {
                 Text(
                   'ab ${item.minPrice.toStringAsFixed(2)} €',
                   style: GoogleFonts.poppins(
-                    color: Colors.orange,
+                    color: Colors.orangeAccent,
                     fontSize: 16,
                     fontWeight: FontWeight.bold,
                   ),
@@ -328,4 +590,79 @@ class _MenuCard extends StatelessWidget {
       ),
     );
   }
+}
+
+Widget _buildRecentOrders(BuildContext context) {
+  final appTheme = ThemeProvider.of(context);
+
+  return Container(
+    decoration: BoxDecoration(
+      color: appTheme.cardColor,
+      borderRadius: BorderRadius.circular(16),
+      // Убираем прозрачность/затемнение для белой темы
+    ),
+    child: Stack(
+      children: [
+        // ...existing code...
+        // Удаляем/не добавляем затемнение справа для белой темы
+        // if (appTheme.backgroundColor != Colors.white)
+        //   Positioned(
+        //     right: 0,
+        //     top: 0,
+        //     bottom: 0,
+        //     child: Container(
+        //       width: 48,
+        //       decoration: BoxDecoration(
+        //         gradient: LinearGradient(
+        //           begin: Alignment.centerLeft,
+        //           end: Alignment.centerRight,
+        //           colors: [
+        //             Colors.transparent,
+        //             Colors.black.withOpacity(0.18),
+        //           ],
+        //         ),
+        //       ),
+        //     ),
+        //   ),
+        // ...existing code...
+      ],
+    ),
+  );
+}
+
+Widget _buildPopularDishes(BuildContext context) {
+  final appTheme = ThemeProvider.of(context);
+
+  return Container(
+    decoration: BoxDecoration(
+      color: appTheme.cardColor,
+      borderRadius: BorderRadius.circular(16),
+      // Убираем прозрачность/затемнение для белой темы
+    ),
+    child: Stack(
+      children: [
+        // ...existing code...
+        // if (appTheme.backgroundColor != Colors.white)
+        //   Positioned(
+        //     right: 0,
+        //     top: 0,
+        //     bottom: 0,
+        //     child: Container(
+        //       width: 48,
+        //       decoration: BoxDecoration(
+        //         gradient: LinearGradient(
+        //           begin: Alignment.centerLeft,
+        //           end: Alignment.centerRight,
+        //           colors: [
+        //             Colors.transparent,
+        //             Colors.black.withOpacity(0.18),
+        //           ],
+        //         ),
+        //       ),
+        //     ),
+        //   ),
+        // ...existing code...
+      ],
+    ),
+  );
 }

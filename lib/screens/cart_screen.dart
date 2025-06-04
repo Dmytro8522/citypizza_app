@@ -1,14 +1,19 @@
-import 'package:flutter/foundation.dart';
+// lib/screens/cart_screen.dart
+
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../services/cart_service.dart';
-import 'menu_item_detail_screen.dart';
-import 'home_screen.dart';
+import '../services/discount_service.dart';
+import '../widgets/no_internet_widget.dart';
 import 'checkout_screen.dart';
+import 'menu_item_detail_screen.dart';
+import 'home_screen.dart'; // для MenuItem
+import '../theme/theme_provider.dart';
 
-/// Вспомогательный класс для хранения информации по добавкам
 class _ExtraInfo {
   final String name;
   final double price;
@@ -23,252 +28,383 @@ class CartScreen extends StatefulWidget {
   State<CartScreen> createState() => _CartScreenState();
 }
 
-class _CartScreenState extends State<CartScreen> {
+class _CartScreenState extends State<CartScreen>
+    with SingleTickerProviderStateMixin {
   bool _loadingDetails = true;
   double _totalSum = 0;
+  double _totalDiscount = 0;
+  List<Map<String, dynamic>> _appliedDiscounts = [];
+
+  final Map<int, int> _itemCategoryCache = {};
+  final Map<String, TextEditingController> _commentControllers = {};
+  final Set<String> _commentVisible = {};
+
+  DateTime? _userBirthdate;
+  String? _userId;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    CartService.init().then((_) {
-      // после загрузки корзины пересчитаем общую сумму с учётом добавок
-      _recalculateTotal();
+    CartService.init().then((_) async {
+      await _loadUserData();
+      await _recalculateTotal();
     });
   }
 
-  /// Загружает для всех строк корзины информацию по добавкам и обновляет _totalSum
-  Future<void> _recalculateTotal() async {
-    final items = CartService.items;
-    // группируем по уникальным позициям с учётом добавок
-    final grouped = <String, List<CartItem>>{};
-    for (final cartItem in items) {
-      final key =
-          '${cartItem.itemId}|${cartItem.size}|${cartItem.extras.entries.map((e) => '${e.key}:${e.value}').join(',')}';
-      grouped.putIfAbsent(key, () => []).add(cartItem);
-    }
-
-    double sum = 0;
-    for (final entry in grouped.entries) {
-      final first = entry.value.first;
-      final count = entry.value.length;
-      // считаем стоимость добавок для этой позиции
-      final extras = await _loadExtrasInfo(first.extras, first.size);
-      final extrasCost = extras.fold<double>(
-        0,
-        (prev, e) => prev + e.price * e.quantity,
-      );
-      sum += first.basePrice * count + extrasCost * count;
-    }
-
-    setState(() {
-      _totalSum = sum;
-      _loadingDetails = false;
-    });
+  Future<void> _loadUserData() async {
+    final user = Supabase.instance.client.auth.currentUser;
+    _userId = user?.id;
+    if (_userId == null) return;
+    final profile = await Supabase.instance.client
+        .from('user_profiles')
+        .select('birthdate')
+        .eq('id', _userId!)
+        .maybeSingle();
+    final birthdateStr = profile?['birthdate'];
+    _userBirthdate =
+        birthdateStr != null ? DateTime.parse(birthdateStr) : null;
   }
 
-  /// Берёт из Supabase названия и цены добавок для заданной size
+  Future<int?> _getCategoryId(int itemId) async {
+    if (_itemCategoryCache.containsKey(itemId)) {
+      return _itemCategoryCache[itemId];
+    }
+    final res = await Supabase.instance.client
+        .from('menu_item')
+        .select('category_id')
+        .eq('id', itemId)
+        .maybeSingle();
+    final categoryId = res?['category_id'] as int?;
+    if (categoryId != null) {
+      _itemCategoryCache[itemId] = categoryId;
+    }
+    return categoryId;
+  }
+
   Future<List<_ExtraInfo>> _loadExtrasInfo(
-      Map<int, int> extrasMap, String sizeName) async {
+      int itemId, Map<int, int> extrasMap, String sizeName) async {
     if (extrasMap.isEmpty) return [];
-
-    // 1) Находим id размера
     final szRow = await Supabase.instance.client
-        .from('sizes')
+        .from('menu_size')
         .select('id')
         .eq('name', sizeName)
-        .single();
+        .maybeSingle();
+    if (szRow == null) return [];
     final sizeId = szRow['id'] as int;
 
-    // 2) Загружаем названия добавок
-    final extraIds = extrasMap.keys.toList();
-    final namesData = await Supabase.instance.client
-        .from('extras')
-        .select('id,name')
-        .filter('id', 'in', extraIds);
-    final nameMap = <int, String>{
-      for (var e in namesData as List) e['id'] as int: e['name'] as String
-    };
-
-    // 3) Загружаем цены добавок для этого размера
-    final priceData = await Supabase.instance.client
-        .from('extra_price')
-        .select('extra_id,price')
-        .eq('size_id', sizeId)
-        .filter('extra_id', 'in', extraIds);
+    final extraPriceRows = await Supabase.instance.client
+        .from('menu_item_extra_price')
+        .select('extra_id, price')
+        .eq('menu_item_id', itemId)
+        .eq('size_id', sizeId);
     final priceMap = <int, double>{
-      for (var p in priceData as List)
-        p['extra_id'] as int: (p['price'] as num).toDouble()
+      for (var row in extraPriceRows as List)
+        row['extra_id'] as int: (row['price'] as num).toDouble(),
     };
 
-    // 4) Собираем список _ExtraInfo
-    return extrasMap.entries.map((e) {
-      final id = e.key;
-      final qty = e.value;
-      return _ExtraInfo(
-        name: nameMap[id]!,
-        price: priceMap[id] ?? 0,
-        quantity: qty,
+    final extraRows = await Supabase.instance.client
+        .from('menu_extra')
+        .select('id, name')
+        .filter('id', 'in', extrasMap.keys.toList());
+    final nameMap = <int, String>{
+      for (var row in extraRows as List) row['id'] as int: row['name'] as String,
+    };
+
+    return extrasMap.entries
+        .map((e) => _ExtraInfo(
+              name: nameMap[e.key] ?? 'Неизвестно',
+              price: priceMap[e.key] ?? 0,
+              quantity: e.value,
+            ))
+        .toList();
+  }
+
+  Future<void> _recalculateTotal() async {
+    try {
+      final items = CartService.items;
+      final grouped = <String, List<CartItem>>{};
+      for (final cartItem in items) {
+        final key =
+            '${cartItem.itemId}|${cartItem.size}|${cartItem.extras.entries.map((e) => '${e.key}:${e.value}').join(',')}';
+        grouped.putIfAbsent(key, () => []).add(cartItem);
+        _commentControllers.putIfAbsent(key, () => TextEditingController());
+      }
+
+      double subtotal = 0;
+      final cartList = <Map<String, dynamic>>[];
+
+      for (final entry in grouped.entries) {
+        final first = entry.value.first;
+        final count = entry.value.length;
+        final extras =
+            await _loadExtrasInfo(first.itemId, first.extras, first.size);
+        final extrasCost =
+            extras.fold<double>(0, (p, e) => p + e.price * e.quantity);
+        final lineTotal = (first.basePrice + extrasCost) * count;
+        subtotal += lineTotal;
+
+        final categoryId = await _getCategoryId(first.itemId);
+        cartList.add({
+          'id': first.itemId,
+          'category_id': categoryId,
+          'price': (first.basePrice + extrasCost),
+          'quantity': count,
+        });
+      }
+
+      final discountResult = await calculateDiscountedTotal(
+        cartItems: cartList,
+        subtotal: subtotal,
+        userId: _userId,
+        userBirthdate: _userBirthdate,
       );
-    }).toList();
+
+      if (!mounted) return;
+      setState(() {
+        _totalSum = discountResult.total;
+        _totalDiscount = discountResult.totalDiscount;
+        _appliedDiscounts = discountResult.appliedDiscounts;
+        _loadingDetails = false;
+      });
+    } on SocketException {
+      setState(() {
+        _error = 'Keine Internetverbindung';
+        _loadingDetails = false;
+      });
+      return;
+    } catch (e) {
+      setState(() {
+        _error = e.toString();
+        _loadingDetails = false;
+      });
+      return;
+    }
+  }
+
+  void _navigateToDetail(int itemId) async {
+    final supabase = Supabase.instance.client;
+    final m = await supabase
+        .from('menu_item')
+        .select('''
+          id,name,description,image_url,article,
+          has_multiple_sizes,single_size_price
+        ''')
+        .eq('id', itemId)
+        .maybeSingle() as Map<String, dynamic>?;
+    if (m == null) return;
+    final hasMulti = m['has_multiple_sizes'] as bool? ?? false;
+    final singlePrice = m['single_size_price'] != null
+        ? (m['single_size_price'] as num).toDouble()
+        : 0.0;
+    double minPrice = singlePrice;
+    if (hasMulti) {
+      final pr = await supabase
+          .from('menu_item_price')
+          .select('price')
+          .eq('menu_item_id', itemId)
+          .order('price', ascending: true)
+          .limit(1);
+      if (pr is List && pr.isNotEmpty) {
+        minPrice = (pr.first['price'] as num).toDouble();
+      }
+    }
+    final menuItem = MenuItem(
+      id: m['id'] as int,
+      name: m['name'] as String? ?? '',
+      description: m['description'] as String?,
+      imageUrl: m['image_url'] as String?,
+      article: m['article'] as String?,
+      klein: null,
+      normal: null,
+      gross: null,
+      familie: null,
+      party: null,
+      minPrice: minPrice,
+      hasMultipleSizes: hasMulti,
+      singleSizePrice: hasMulti ? null : singlePrice,
+    );
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+          builder: (_) => MenuItemDetailScreen(item: menuItem)),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    final appTheme = ThemeProvider.of(context);
+
+    if (_loadingDetails) {
+      return Scaffold(
+        backgroundColor: appTheme.backgroundColor,
+        appBar: AppBar(
+          backgroundColor: appTheme.backgroundColor,
+          leading: IconButton(
+            icon: Icon(Icons.arrow_back, color: appTheme.textColor),
+            onPressed: () => Navigator.pop(context),
+          ),
+          title: Text('Warenkorb',
+              style: GoogleFonts.fredokaOne(color: appTheme.primaryColor)),
+          centerTitle: true,
+        ),
+        body: const Center(child: CircularProgressIndicator(color: Colors.orange)),
+      );
+    }
+    if (_error != null) {
+      return Scaffold(
+        backgroundColor: appTheme.backgroundColor,
+        appBar: AppBar(
+          backgroundColor: appTheme.backgroundColor,
+          leading: IconButton(
+            icon: Icon(Icons.arrow_back, color: appTheme.textColor),
+            onPressed: () => Navigator.pop(context),
+          ),
+          title: Text('Warenkorb',
+              style: GoogleFonts.fredokaOne(color: appTheme.primaryColor)),
+          centerTitle: true,
+        ),
+        body: NoInternetWidget(
+          onRetry: _recalculateTotal,
+          errorText: _error,
+        ),
+      );
+    }
+
     final items = CartService.items;
-    // группируем одинаковые позиции по ключу
     final grouped = <String, List<CartItem>>{};
     for (final cartItem in items) {
       final key =
           '${cartItem.itemId}|${cartItem.size}|${cartItem.extras.entries.map((e) => '${e.key}:${e.value}').join(',')}';
       grouped.putIfAbsent(key, () => []).add(cartItem);
     }
-
-    // подготавливаем данные для отображения (без extras cost — он будет загружен асинхронно)
     final lines = grouped.entries.map((entry) {
-      final groupItems = entry.value;
-      final first = groupItems.first;
-      final count = groupItems.length;
-      // предварительный total без добавок
-      final totalBase = first.basePrice * count;
-      return {'item': first, 'count': count, 'totalBase': totalBase};
+      final first = entry.value.first;
+      final count = entry.value.length;
+      final baseTotal = first.basePrice * count;
+      return {
+        'key': entry.key,
+        'item': first,
+        'count': count,
+        'baseTotal': baseTotal,
+      };
     }).toList();
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: appTheme.backgroundColor,
       appBar: AppBar(
-        backgroundColor: Colors.black,
+        backgroundColor: appTheme.backgroundColor,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          icon: Icon(Icons.arrow_back, color: appTheme.textColor),
           onPressed: () => Navigator.pop(context),
         ),
         title: Text('Warenkorb',
-            style: GoogleFonts.fredokaOne(color: Colors.orange)),
+            style: GoogleFonts.fredokaOne(color: appTheme.primaryColor)),
         centerTitle: true,
       ),
-      body: lines.isEmpty
-          ? Center(
-              child: Text('Ihr Warenkorb ist leer',
-                  style: GoogleFonts.poppins(color: Colors.white70)),
-            )
-          : ListView.builder(
-              padding:
-                  const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
-              itemCount: lines.length,
-              itemBuilder: (context, index) {
-                final line = lines[index];
-                final CartItem cartItem = line['item'] as CartItem;
-                final int count = line['count'] as int;
-                final double baseTotal = line['totalBase'] as double;
-
-                return FutureBuilder<List<_ExtraInfo>>(
-                  future:
-                      _loadExtrasInfo(cartItem.extras, cartItem.size),
-                  builder: (context, snap) {
-                    final extras = snap.data ?? [];
-                    final extrasCost = extras.fold<double>(
-                        0, (p, e) => p + e.price * e.quantity);
-                    final lineTotal =
-                        baseTotal + extrasCost;
-
-                    return InkWell(
-                      onTap: () async {
-                        // Загружаем полные данные MenuItem из Supabase
-                        final data = await Supabase.instance.client
-                            .from('menu_item')
-                            .select()
-                            .eq('id', cartItem.itemId)
-                            .single();
-                        final menuItem =
-                            MenuItem.fromMap(data as Map<String, dynamic>);
-                        await Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) =>
-                                MenuItemDetailScreen(item: menuItem),
-                          ),
-                        );
-                        setState(() {});
-                      },
-                      child: Container(
-                        margin: const EdgeInsets.only(bottom: 12),
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: Colors.white10,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.start,
-                                children: [
-                                  Text(cartItem.name,
-                                      style: GoogleFonts.poppins(
-                                          color: Colors.white,
-                                          fontSize: 16,
-                                          fontWeight:
-                                              FontWeight.w600)),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    '${cartItem.size}, Menge: $count',
-                                    style: GoogleFonts.poppins(
-                                        color: Colors.white54,
-                                        fontSize: 12),
-                                  ),
-                                  // список добавок
-                                  if (extras.isNotEmpty) ...[
-                                    const SizedBox(height: 8),
-                                    ...extras.map((e) => Text(
-                                          '+ ${e.name} ×${e.quantity} '
-                                          '(€${(e.price * e.quantity).toStringAsFixed(2)})',
-                                          style: GoogleFonts.poppins(
-                                              color: Colors.white70,
-                                              fontSize: 12),
-                                        )),
-                                  ],
-                                ],
-                              ),
+      body: Column(
+        children: [
+          Expanded(
+            child: lines.isEmpty
+                ? Center(
+                    child: Text('Ihr Warenkorb ist leer',
+                        style: GoogleFonts.poppins(color: appTheme.textColorSecondary)),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 16),
+                    itemCount: lines.length,
+                    itemBuilder: (context, index) {
+                      final line = lines[index];
+                      final cartItem = line['item'] as CartItem;
+                      final count = line['count'] as int;
+                      final baseTotal = line['baseTotal'] as double;
+                      return FutureBuilder<List<_ExtraInfo>>(
+                        future: _loadExtrasInfo(
+                            cartItem.itemId, cartItem.extras, cartItem.size),
+                        builder: (context, snap) {
+                          final extras = snap.data ?? [];
+                          final extrasCost = extras.fold<double>(
+                              0, (p, e) => p + e.price * e.quantity);
+                          final lineTotal = baseTotal + extrasCost * count;
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 12),
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: appTheme.cardColor,
+                              borderRadius: BorderRadius.circular(12),
                             ),
-                            const SizedBox(width: 16),
-                            Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment:
-                                  CrossAxisAlignment.end,
+                            child: Row(
                               children: [
-                                Text(
-                                  '€${lineTotal.toStringAsFixed(2)}',
-                                  style: GoogleFonts.poppins(
-                                      color: Colors.white,
-                                      fontSize: 16),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        '${cartItem.article != null ? '[${cartItem.article!}] ' : ''}${cartItem.name}',
+                                        style: GoogleFonts.poppins(
+                                          color: appTheme.textColor,
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        '${cartItem.size}, Menge: $count',
+                                        style: GoogleFonts.poppins(
+                                          color: appTheme.textColorSecondary,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                      // --- ДОПОЛНЕНИЯ ---
+                                      if (extras.isNotEmpty) ...[
+                                        const SizedBox(height: 6),
+                                        ...extras.map((e) => Text(
+                                              '${e.quantity} × ${e.name} (+${e.price.toStringAsFixed(2)} €)',
+                                              style: GoogleFonts.poppins(
+                                                color: appTheme.textColorSecondary,
+                                                fontSize: 13,
+                                              ),
+                                            )),
+                                      ],
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        '€${lineTotal.toStringAsFixed(2)}',
+                                        style: GoogleFonts.poppins(
+                                          color: appTheme.textColor,
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ),
-                                const SizedBox(height: 8),
                                 Row(
-                                  mainAxisSize: MainAxisSize.min,
                                   children: [
                                     IconButton(
-                                      icon: const Icon(
+                                      icon: Icon(
                                           Icons.remove_circle_outline,
-                                          color: Colors.white),
+                                          color: appTheme.iconColor),
                                       onPressed: () async {
-                                        await CartService
-                                            .removeItem(cartItem);
+                                        await CartService.removeItem(cartItem);
                                         await _recalculateTotal();
                                         setState(() {});
                                       },
                                     ),
-                                    Text('$count',
-                                        style: GoogleFonts.poppins(
-                                            color: Colors.white,
-                                            fontSize: 14)),
+                                    Text(
+                                      '$count',
+                                      style: GoogleFonts.poppins(
+                                        color: appTheme.textColor,
+                                        fontSize: 14,
+                                      ),
+                                    ),
                                     IconButton(
-                                      icon: const Icon(
+                                      icon: Icon(
                                           Icons.add_circle_outline,
-                                          color: Colors.white),
+                                          color: appTheme.iconColor),
                                       onPressed: () async {
-                                        await CartService
-                                            .addItem(cartItem);
+                                        await CartService.addItem(cartItem);
                                         await _recalculateTotal();
                                         setState(() {});
                                       },
@@ -277,70 +413,96 @@ class _CartScreenState extends State<CartScreen> {
                                 ),
                               ],
                             ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                );
-              },
-            ),
-      bottomNavigationBar: lines.isEmpty
-          ? null
-          : Padding(
-              padding: const EdgeInsets.all(16),
-              child: _loadingDetails
-                  // пока пересчитывается общая сумма, показываем индикатор
-                  ? const Center(
-                      child: CircularProgressIndicator(
-                          color: Colors.orange),
-                    )
-                  : Column(
-                      mainAxisSize: MainAxisSize.min,
+                          );
+                        },
+                      );
+                    },
+                  ),
+          ),
+
+          SafeArea(
+            top: false,
+            child: Container(
+              color: appTheme.backgroundColor,
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_totalDiscount > 0) ...[
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Row(
-                          mainAxisAlignment:
-                              MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text('Gesamt:',
-                                style: GoogleFonts.poppins(
-                                    color: Colors.white,
-                                    fontSize: 18)),
-                            Text(
-                                '€${_totalSum.toStringAsFixed(2)}',
-                                style: GoogleFonts.poppins(
-                                    color: Colors.white,
-                                    fontSize: 18)),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.orange,
-                            minimumSize:
-                                const Size.fromHeight(50),
-                            shape: RoundedRectangleBorder(
-                                borderRadius:
-                                    BorderRadius.circular(30)),
-                          ),
-                          onPressed: () {
+                        Text('Rabatt:',
+                            style: GoogleFonts.poppins(
+                                color: appTheme.primaryColor,
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold)),
+                        Text('-€${_totalDiscount.toStringAsFixed(2)}',
+                            style: GoogleFonts.poppins(
+                                color: appTheme.primaryColor,
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('Gesamt:',
+                          style:
+                              GoogleFonts.poppins(color: appTheme.textColor, fontSize: 18)),
+                      Text('€${_totalSum.toStringAsFixed(2)}',
+                          style:
+                              GoogleFonts.poppins(color: appTheme.textColor, fontSize: 18)),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: appTheme.buttonColor,
+                      minimumSize: const Size.fromHeight(50),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(30)),
+                    ),
+                    onPressed: lines.isEmpty
+                        ? () {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  'Ihr Warenkorb ist leer. Bitte fügen Sie Artikel hinzu.',
+                                  style: TextStyle(color: appTheme.textColor),
+                                ),
+                                backgroundColor: appTheme.primaryColor,
+                              ),
+                            );
+                          }
+                        : () {
+                            final comments = _commentControllers
+                                .map((k, v) => MapEntry(k, v.text.trim()));
+                            final roundedTotal =
+                                double.parse(_totalSum.toStringAsFixed(2));
                             Navigator.push(
                               context,
                               MaterialPageRoute(
-                                builder: (_) =>
-                                    CheckoutScreen(
-                                        totalSum: _totalSum),
+                                builder: (_) => CheckoutScreen(
+                                  totalSum: roundedTotal,
+                                  itemComments: comments,
+                                  totalDiscount: _totalDiscount,
+                                  appliedDiscounts: _appliedDiscounts,
+                                ),
                               ),
                             );
                           },
-                          child: Text('Zur Kasse',
-                              style: GoogleFonts.poppins(
-                                  color: Colors.black,
-                                  fontSize: 18)),
-                        ),
-                      ],
-                    ),
+                    child: Text('Zur Kasse',
+                        style: GoogleFonts.poppins(color: appTheme.textColor, fontSize: 18)),
+                  ),
+                ],
+              ),
             ),
+          ),
+        ],
+      ),
     );
   }
 }

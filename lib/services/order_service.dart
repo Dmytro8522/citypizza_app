@@ -1,12 +1,14 @@
-// lib/services/order_service.dart
-
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'cart_service.dart';
 
 class OrderService {
   static final SupabaseClient _db = Supabase.instance.client;
 
-  /// Создаёт новый заказ в трёх таблицах и очищает локальную корзину.
+  /// Создаёт новый заказ:
+  /// 1) вставляет запись в orders,
+  /// 2) CartItem → order_items (+ item_comment),
+  /// 3) extras → order_item_extras,
+  /// 4) очищает корзину.
   static Future<void> createOrder({
     required String name,
     required String phone,
@@ -16,110 +18,117 @@ class OrderService {
     required String street,
     required String houseNumber,
     required String postalCode,
+    required String floor,
+    required String comment,
+    required String courierComment,
+    required Map<String, String> itemComments,
+    required double totalSum,
     required bool isCustomTime,
     DateTime? scheduledTime,
+    double? totalDiscount,
+    List<Map<String, dynamic>>? appliedDiscounts,
   }) async {
-    // 1) Вставляем запись в таблицу orders и сразу возвращаем её поля
-    final PostgrestResponse orderRes = await _db
-        .from('orders')
-        .insert({
-          'user_id': _db.auth.currentUser!.id,
-          'name': name,
-          'phone': phone,
-          'is_delivery': isDelivery,
-          'payment_method': paymentMethod,
-          'city': city,
-          'street': street,
-          'house_number': houseNumber,
-          'postal_code': postalCode,
-          'scheduled_time': isCustomTime && scheduledTime != null
-              ? scheduledTime.toIso8601String()
-              : null,
-        })
-        .select()            // без аргумента — вернёт все поля
-        .single()            // ожидаем ровно одну запись
-        .execute();          // здесь и получаем PostgrestResponse
+    // 1) Insert в orders и возврат ID
+    final orderInsert = await _db.from('orders').insert({
+      'user_id': _db.auth.currentUser?.id,
+      'name': name,
+      'phone': phone,
+      'is_delivery': isDelivery,
+      'payment_method': paymentMethod,
+      'city': city,
+      'street': street,
+      'house_number': houseNumber,
+      'postal_code': postalCode,
+      'floor': floor,
+      'order_comment': comment,
+      'courier_comment': courierComment,
+      'total_sum': totalSum,
+      'discount_amount': totalDiscount ?? 0,
+      if (appliedDiscounts != null) 'applied_discounts': appliedDiscounts,
+      if (isCustomTime && scheduledTime != null)
+        'scheduled_time': scheduledTime.toIso8601String(),
+    }).select('id').single();
 
-    if (orderRes.error != null) {
-      throw orderRes.error!;  // бросаем ошибку Supabase
-    }
+    final int orderId = orderInsert['id'] as int;
 
-    // приводим data к нужному типу
-    final orderData = orderRes.data as Map<String, dynamic>;
-    final int orderId = orderData['id'] as int;
+    // 2) Вставка позиций
+    final items = CartService.items;
+    for (final cartItem in items) {
+      // генерируем ключ для комментариев
+      final commentKey =
+          '${cartItem.itemId}|${cartItem.size}|${cartItem.extras.entries.map((e) => '${e.key}:${e.value}').join(',')}';
+      final itemComment = itemComments[commentKey] ?? '';
 
-    // 2) Вставляем все позиции из локальной корзины
-    final items = List<CartItem>.from(CartService.items);
-    for (final item in items) {
-      final PostgrestResponse itemRes = await _db
-          .from('order_items')
-          .insert({
-            'order_id': orderId,
-            'menu_item_id': item.itemId,
-            'size': item.size,
-            'quantity': 1,
-            'base_price': item.basePrice,
-          })
-          .select()
-          .single()
-          .execute();
-
-      if (itemRes.error != null) {
-        throw itemRes.error!;
-      }
-
-      final itemData = itemRes.data as Map<String, dynamic>;
-      final int orderItemId = itemData['id'] as int;
-
-      // 3) Вставляем добавки к этой позиции
-      for (final extraEntry in item.extras.entries) {
-        final PostgrestResponse extraRes = await _db
-            .from('order_item_extras')
-            .insert({
-              'order_item_id': orderItemId,
-              'extra_id': extraEntry.key,
-              'quantity': extraEntry.value,
-            })
-            .execute();
-
-        if (extraRes.error != null) {
-          throw extraRes.error!;
+      // Определяем size_id
+      int? sizeId = cartItem.sizeId;
+      if (sizeId == null) {
+        final szRow = await _db
+            .from('menu_size')
+            .select('id')
+            .eq('name', cartItem.size)
+            .maybeSingle();
+        if (szRow == null || szRow['id'] == null) {
+          throw Exception(
+              'Не удалось определить size_id для размера "${cartItem.size}"');
         }
+        sizeId = szRow['id'] as int;
+      }
+
+      // Вставляем order_item (каждая CartItem — количество 1)
+      final createdItem = await _db.from('order_items').insert({
+        'order_id': orderId,
+        'menu_item_id': cartItem.itemId,
+        'size_id': sizeId,
+        'quantity': 1,
+        'base_price': cartItem.basePrice,
+        'price': cartItem.basePrice,
+        'line_total': cartItem.basePrice,
+        'item_name': cartItem.name,
+        if (itemComment.isNotEmpty) 'item_comment': itemComment,
+        if (cartItem.article != null) 'article': cartItem.article,
+      }).select('id').single();
+
+      final int orderItemId = createdItem['id'] as int;
+
+      // 3) Вставка extras для позиции
+      for (final extraEntry in cartItem.extras.entries) {
+        final extraId = extraEntry.key;
+        final quantity = extraEntry.value;
+        // Получаем цену допов
+        final priceRow = await _db
+            .from('menu_item_extra_price')
+            .select('price')
+            .eq('menu_item_id', cartItem.itemId)
+            .eq('size_id', sizeId)
+            .eq('extra_id', extraId)
+            .maybeSingle();
+        final extraPrice = priceRow != null
+            ? (priceRow['price'] as num).toDouble()
+            : 0.0;
+
+        await _db.from('order_item_extras').insert({
+          'order_item_id': orderItemId,
+          'extra_id': extraId,
+          'size_id': sizeId,
+          'quantity': quantity,
+          'price': extraPrice,
+        });
       }
     }
 
-    // 4) Очищаем локальную корзину
+    // 4) Очистка корзины
     await CartService.clear();
   }
 
-  /// Забирает историю заказов текущего пользователя вместе с позициями и их добавками
+  /// Возвращает историю заказов текущего пользователя вместе с вложением
   static Future<List<Map<String, dynamic>>> getOrderHistory() async {
     final userId = _db.auth.currentUser?.id;
-    if (userId == null) {
-      return [];
-    }
-
-    final PostgrestResponse historyRes = await _db
+    if (userId == null) return [];
+    final data = await _db
         .from('orders')
-        .select<List<Map<String, dynamic>>>(
-          '''
-          *,
-          order_items (
-            *,
-            order_item_extras (*)
-          )
-          '''
-        )
+        .select('*, order_items(*, order_item_extras(*))')
         .eq('user_id', userId)
-        .order('created_at', ascending: false)
-        .execute();
-
-    if (historyRes.error != null) {
-      throw historyRes.error!;
-    }
-
-    // data — это List<dynamic>, приводим к нужному формату
-    final rawList = historyRes.data as List<dynamic>;
-    return rawList.cast<Map<String, dynamic>>();
+        .order('created_at', ascending: false);
+    return (data as List).cast();
   }
 }

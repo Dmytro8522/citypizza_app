@@ -109,38 +109,42 @@ class _WorkingHoursBannerState extends State<WorkingHoursBanner>
         position: _slideAnim,
         child: FadeTransition(
           opacity: _opacityAnim,
-          child: Material(
-            elevation: 8,
-            color: Colors.transparent,
-            child: Container(
+          child: Container(
+            decoration: BoxDecoration(
               color: Colors.orange.shade700,
-              padding:
-                  const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-              child: Row(
-                children: [
-                  const Expanded(
-                    child: Text(
-                      'Wir sind gerade geschlossen. '
-                      'Sie können trotzdem jetzt bestellen – Lieferung, sobald wir öffnen.',
-                      style: TextStyle(color: Colors.white),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.3),
+                  blurRadius: 8,
+                  offset: const Offset(0, -2),
+                ),
+              ],
+            ),
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'Wir sind gerade geschlossen. '
+                    'Sie können trotzdem jetzt bestellen – Lieferung, sobald wir öffnen.',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _showHoursDialog,
+                  child: const Text(
+                    'Öffnungszeiten',
+                    style: TextStyle(
+                      color: Colors.white,
+                      decoration: TextDecoration.underline,
                     ),
                   ),
-                  TextButton(
-                    onPressed: _showHoursDialog,
-                    child: const Text(
-                      'Öffnungszeiten',
-                      style: TextStyle(
-                        color: Colors.white,
-                        decoration: TextDecoration.underline,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
-                    onPressed: () => setState(() => _manuallyClosed = true),
-                  ),
-                ],
-              ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white),
+                  onPressed: () => setState(() => _manuallyClosed = true),
+                ),
+              ],
             ),
           ),
         ),

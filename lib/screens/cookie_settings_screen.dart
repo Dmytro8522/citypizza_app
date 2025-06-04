@@ -1,9 +1,12 @@
+// lib/screens/cookie_settings_screen.dart
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/gestures.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../services/consent_service.dart';
-import 'home_screen.dart';
+// Теперь импортим весь скелет приложения с нижним меню:
+import '../widgets/main_scaffold.dart';
 
 class CookieSettingsScreen extends StatefulWidget {
   const CookieSettingsScreen({Key? key}) : super(key: key);
@@ -40,8 +43,10 @@ class _CookieSettingsScreenState extends State<CookieSettingsScreen> {
       await ConsentService.setConsent(CookieType.analyse, false);
       await ConsentService.setConsent(CookieType.personalisation, false);
     }
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const HomeScreen()),
+    // Очищаем весь стек и открываем MainScaffold:
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const MainScaffold()),
+      (route) => false,
     );
   }
 

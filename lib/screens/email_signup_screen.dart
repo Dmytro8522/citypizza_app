@@ -10,7 +10,22 @@ import 'email_login_screen.dart';
 import 'home_screen.dart';
 
 class EmailSignupScreen extends StatefulWidget {
-  const EmailSignupScreen({Key? key}) : super(key: key);
+  final String? initialName;
+  final String? initialPhone;
+  final String? initialCity;
+  final String? initialStreet;
+  final String? initialHouseNumber;
+  final String? initialPostal;
+
+  const EmailSignupScreen({
+    Key? key,
+    this.initialName,
+    this.initialPhone,
+    this.initialCity,
+    this.initialStreet,
+    this.initialHouseNumber,
+    this.initialPostal,
+  }) : super(key: key);
 
   @override
   State<EmailSignupScreen> createState() => _EmailSignupScreenState();
@@ -41,6 +56,17 @@ class _EmailSignupScreenState extends State<EmailSignupScreen> {
     _houseNumberController.dispose();
     _postalController.dispose();
     super.dispose();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initialName != null) _nameController.text = widget.initialName!;
+    if (widget.initialPhone != null) _phoneController.text = widget.initialPhone!;
+    if (widget.initialCity != null) _cityController.text = widget.initialCity!;
+    if (widget.initialStreet != null) _streetController.text = widget.initialStreet!;
+    if (widget.initialHouseNumber != null) _houseNumberController.text = widget.initialHouseNumber!;
+    if (widget.initialPostal != null) _postalController.text = widget.initialPostal!;
   }
 
   InputDecoration _inputDecoration(String label) => InputDecoration(
